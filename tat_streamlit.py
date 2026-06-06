@@ -763,210 +763,86 @@ with tab4:
 
         st.divider()
 
-        # ── Excel Export ──────────────────────────────────────────────────────
+        # ── Excel Export ─────────────────────────────────────────────────────
         st.subheader("Export to Excel")
 
+        # Generate once → store bytes in session_state → show download button
+        # (keeps generate & download buttons in SEPARATE reruns — no loop hang)
         if st.button("Generate Excel Report", type="secondary"):
-            with st.spinner("Building workbook..."):
-                try:
-                    from openpyxl import Workbook
-                    from openpyxl.styles import (Font, PatternFill, Alignment,
-                                                  Border, Side)
-                    from openpyxl.chart import BarChart, Reference
-                    from openpyxl.utils import get_column_letter
+            try:
+                result_df    = st.session_state.result_df
+                valid_ranges = st.session_state.valid_ranges
+                pct          = int(pct_lbl[1:])
 
-                    result_df   = st.session_state.result_df
-                    df_calc     = st.session_state.df_calc
-                    df_raw      = st.session_state.df_raw
-                    valid_ranges = st.session_state.valid_ranges
-                    ic   = st.session_state.get('cfg_inst', '')
-                    tc   = st.session_state.get('cfg_test', '')
-                    sc   = st.session_state.get('cfg_sid',  '')
-                    wl_c = st.session_state.get('cfg_wl',   '')
-                    per  = st.session_state.get('cfg_period', 'Day').lower()
-                    pct  = int(pct_lbl[1:])
+                buf = io.BytesIO()
 
-                    wb = Workbook()
+                # Build one sheet per TAT range using openpyxl directly
+                # (no charts, no raw data — just the summary stats table)
+                from openpyxl import Workbook
+                from openpyxl.styles import Font, PatternFill, Alignment
+                from openpyxl.utils import get_column_letter
 
-                    hdr_fill = PatternFill("solid", fgColor="1E3A8A")
-                    alt_fill = PatternFill("solid", fgColor="EFF6FF")
-                    hdr_font = Font(color="FFFFFF", bold=True, name="Calibri", size=11)
-                    ctr  = Alignment(horizontal='center', vertical='center',
-                                      wrap_text=True)
-                    thin = Border(
-                        left=Side(style='thin', color='D1D5DB'),
-                        right=Side(style='thin', color='D1D5DB'),
-                        top=Side(style='thin', color='D1D5DB'),
-                        bottom=Side(style='thin', color='D1D5DB'),
-                    )
+                wb  = Workbook(write_only=False)
+                hdr_fill = PatternFill("solid", fgColor="1E3A8A")
+                hdr_font = Font(color="FFFFFF", bold=True, name="Calibri")
+                ctr      = Alignment(horizontal='center', vertical='center')
 
-                    def hc(ws, r, c, v):
-                        cell = ws.cell(row=r, column=c, value=v)
-                        cell.fill, cell.font = hdr_fill, hdr_font
-                        cell.alignment, cell.border = ctr, thin
-                    def dc(ws, r, c, v, alt=False):
-                        cell = ws.cell(row=r, column=c, value=v)
-                        cell.alignment, cell.border = ctr, thin
-                        if alt: cell.fill = alt_fill
-                    def aw(ws, extra=4, cap=50):
-                        for col in ws.columns:
-                            w = max((len(str(ce.value or '')) for ce in col), default=8)
-                            ws.column_dimensions[
-                                get_column_letter(col[0].column)
-                            ].width = min(w + extra, cap)
+                def _safe(name):
+                    for ch in r'/\*?[]:<>|':
+                        name = name.replace(ch, '-')
+                    return name[:31]
 
-                    # Sheet 1 - TAT Summary
-                    ws1 = wb.active
-                    ws1.title = "TAT Summary"
+                # Sheet per range
+                for lbl, _ in tat_col_map:
+                    ws = wb.create_sheet(title=_safe(lbl))
+                    headers = ['Group', 'Samples', 'Tests',
+                               'Min (min)', 'Max (min)', 'Mean (min)',
+                               'Median (min)', f'{pct_lbl} (min)', 'Quality']
+                    src_keys = ['Group', 'Samples', 'Tests',
+                                f'Min ({lbl})', f'Max ({lbl})', f'Mean ({lbl})',
+                                f'Median ({lbl})', f'{pct_lbl} ({lbl})',
+                                f'Quality ({lbl})']
 
-                    rng_summary = "; ".join(
-                        f"{lbl} ({fc} to {toc})"
-                        for lbl, fc, toc in valid_ranges
-                    )
-                    meta = [
-                        ("Generated",         datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
-                        ("TAT Ranges",         rng_summary),
-                        ("Percentile",         f"{pct}th"),
-                        ("Group By",           st.session_state.get('cfg_grp', '')),
-                        ("Total Records",      f"{kpi['rows']:,}"),
-                        ("Unique Samples",     f"{kpi['samples']:,}"),
-                        ("Valid TAT Rows",     f"{kpi['valid']:,}"),
-                        ("Missing Timestamps", f"{kpi['missing']:,}"),
-                    ]
-                    nc = max(len(result_df.columns), 2)
-                    ws1.merge_cells(f'A1:{get_column_letter(nc)}1')
-                    ws1['A1'] = "TAT Analysis Report"
-                    ws1['A1'].font      = Font(bold=True, size=16, color="1E3A8A", name="Calibri")
-                    ws1['A1'].alignment = ctr
-                    ws1['A1'].fill      = alt_fill
+                    # Header row
+                    for ci, h in enumerate(headers, 1):
+                        cell = ws.cell(row=1, column=ci, value=h)
+                        cell.fill, cell.font, cell.alignment = hdr_fill, hdr_font, ctr
+                        ws.column_dimensions[get_column_letter(ci)].width = 14
 
-                    for ri, (k, v) in enumerate(meta, 3):
-                        ws1.cell(row=ri, column=1, value=k).font = Font(bold=True, name="Calibri")
-                        ws1.cell(row=ri, column=2, value=v)
+                    # Data rows
+                    for ri, r in enumerate(st.session_state.result_rows, 2):
+                        for ci, sk in enumerate(src_keys, 1):
+                            v = r.get(sk)
+                            if isinstance(v, float) and np.isnan(v):
+                                v = None
+                            ws.cell(row=ri, column=ci, value=v)
 
-                    TBL = len(meta) + 4
-                    ws1.freeze_panes = f'A{TBL+1}'
-                    res_cols = list(result_df.columns)
-                    for ci, cn in enumerate(res_cols, 1):
-                        hc(ws1, TBL, ci, cn)
-                    for ri2, (_, row) in enumerate(result_df.iterrows(), 1):
-                        for ci, cn in enumerate(res_cols, 1):
-                            v = row[cn]
-                            if isinstance(v, float) and np.isnan(v): v = None
-                            dc(ws1, TBL+ri2, ci, v, alt=(ri2 % 2 == 0))
-                    aw(ws1)
+                # Remove default empty sheet
+                if 'Sheet' in wb.sheetnames:
+                    del wb['Sheet']
 
-                    # Sheet 2 - TAT Chart
-                    ws2 = wb.create_sheet("TAT Chart")
-                    chart_cols = ['Group'] + [f'{pct_lbl} ({lbl})' for lbl, _ in tat_col_map]
-                    for ci, cn in enumerate(chart_cols, 1):
-                        hc(ws2, 1, ci, cn)
-                    n_grp = len(result_df)
-                    for ri2, (_, row) in enumerate(result_df.iterrows(), 2):
-                        ws2.cell(row=ri2, column=1, value=str(row.get('Group', '')))
-                        for ci, (lbl, _) in enumerate(tat_col_map, 2):
-                            v = row.get(f'{pct_lbl} ({lbl})')
-                            if v is not None and not (isinstance(v, float) and np.isnan(v)):
-                                ws2.cell(row=ri2, column=ci, value=round(v, 1))
-                    chart = BarChart()
-                    chart.type = "bar"
-                    chart.title = f"{pct_lbl} TAT by Group"
-                    chart.y_axis.title = "Minutes"
-                    chart.style = 10; chart.width = 32; chart.height = 20
-                    chart.add_data(Reference(ws2, min_col=2, min_row=1,
-                                              max_col=len(tat_col_map)+1, max_row=n_grp+1),
-                                   titles_from_data=True)
-                    chart.set_categories(Reference(ws2, min_col=1, min_row=2, max_row=n_grp+1))
-                    ws2.add_chart(chart, f"{get_column_letter(len(chart_cols)+2)}2")
-                    aw(ws2)
+                wb.save(buf)
+                buf.seek(0)
 
-                    # Sheet 3 - Workload
-                    ws3 = wb.create_sheet("Workload")
-                    if wl_c and wl_c in df_raw.columns:
-                        df_wl = df_raw.copy()
-                        df_wl[wl_c] = pd.to_datetime(df_wl[wl_c], errors='coerce', dayfirst=True)
-                        df_wl = df_wl.dropna(subset=[wl_c])
-                        fmt_map = {'hour': '%Y-%m-%d %H:00', 'day': '%Y-%m-%d', 'month': '%Y-%m'}
-                        if per == 'week':
-                            df_wl['_period'] = df_wl[wl_c].dt.to_period('W').astype(str)
-                        else:
-                            df_wl['_period'] = df_wl[wl_c].dt.strftime(fmt_map.get(per, '%Y-%m-%d'))
-                        wl_agg = (df_wl.groupby('_period')
-                                   .agg(Total_Tests=('_period', 'count'))
-                                   .reset_index()
-                                   .rename(columns={'_period': 'Period', 'Total_Tests': 'Total Tests'}))
-                        if sc and sc in df_wl.columns:
-                            tmp = (df_wl.groupby('_period')[sc].nunique().reset_index()
-                                    .rename(columns={'_period': 'Period', sc: 'Unique Samples'}))
-                            wl_agg = wl_agg.merge(tmp, on='Period', how='left')
-                        if tc and tc in df_wl.columns:
-                            tmp = (df_wl.groupby('_period')[tc].nunique().reset_index()
-                                    .rename(columns={'_period': 'Period', tc: 'Unique Test Types'}))
-                            wl_agg = wl_agg.merge(tmp, on='Period', how='left')
+                # Store bytes — download button rendered on NEXT rerun
+                st.session_state['_excel_bytes'] = buf.getvalue()
+                st.session_state['_excel_fname'] = (
+                    f"TAT_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+                st.rerun()
 
-                        wl_cols = list(wl_agg.columns)
-                        for ci, cn in enumerate(wl_cols, 1): hc(ws3, 1, ci, cn)
-                        for ri2, (_, row) in enumerate(wl_agg.iterrows(), 2):
-                            for ci, cn in enumerate(wl_cols, 1):
-                                v = row[cn]
-                                if isinstance(v, float) and np.isnan(v): v = None
-                                dc(ws3, ri2, ci, v, alt=(ri2 % 2 == 0))
-                        if len(wl_agg):
-                            wc = BarChart()
-                            wc.type="col"; wc.title=f"Workload by {per.title()}"
-                            wc.y_axis.title="Count"; wc.style=11
-                            wc.width=28; wc.height=15
-                            n_wl = len(wl_agg)
-                            wc.add_data(Reference(ws3, min_col=2, min_row=1,
-                                                   max_col=2, max_row=n_wl+1),
-                                        titles_from_data=True)
-                            wc.set_categories(Reference(ws3, min_col=1, min_row=2, max_row=n_wl+1))
-                            ws3.add_chart(wc, f"{get_column_letter(len(wl_cols)+2)}2")
-                        aw(ws3)
-                    else:
-                        ws3['A1'] = "Workload date column not configured"
+            except Exception:
+                import traceback
+                st.error("Export error:")
+                st.code(traceback.format_exc())
 
-                    # Sheet 4 - Raw Data
-                    ws4 = wb.create_sheet("Raw Data")
-                    ws4.freeze_panes = 'A2'
-                    raw = df_calc.copy()
-                    rename_map = {c: f"TAT_{lbl}_min" for lbl, c in tat_col_map}
-                    raw.rename(columns=rename_map, inplace=True)
-                    for col in raw.columns:
-                        if pd.api.types.is_datetime64_any_dtype(raw[col]):
-                            raw[col] = raw[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    raw_cols = list(raw.columns)
-                    for ci, cn in enumerate(raw_cols, 1): hc(ws4, 1, ci, cn)
-                    MAX_R = 100_000
-                    n_exp = min(len(raw), MAX_R)
-                    for ri2 in range(n_exp):
-                        alt = (ri2 % 2 == 0)
-                        for ci, cn in enumerate(raw_cols, 1):
-                            v = raw.iloc[ri2][cn]
-                            if not isinstance(v, str) and pd.isna(v): v = None
-                            dc(ws4, ri2+2, ci, v, alt=alt)
-                    if len(raw) > MAX_R:
-                        ws4.cell(row=n_exp+3, column=1,
-                                  value=f"Truncated: {len(raw)-MAX_R:,} more rows not shown"
-                                 ).font = Font(color="DC2626", italic=True)
-                    aw(ws4, extra=2, cap=40)
-
-                    # Save to buffer
-                    buf = io.BytesIO()
-                    wb.save(buf)
-                    buf.seek(0)
-
-                    fname = f"TAT_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                    st.download_button(
-                        label="Download Excel Report",
-                        data=buf,
-                        file_name=fname,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary",
-                        use_container_width=True,
-                    )
-
-                except Exception:
-                    import traceback
-                    st.error("Export error:")
-                    st.code(traceback.format_exc())
+        # Download button lives OUTSIDE the generate button block
+        if st.session_state.get('_excel_bytes'):
+            st.download_button(
+                label="📥  Download Excel",
+                data=st.session_state['_excel_bytes'],
+                file_name=st.session_state['_excel_fname'],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=False,
+            )
+            st.caption(f"Ready: {st.session_state['_excel_fname']}")
