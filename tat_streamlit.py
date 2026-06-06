@@ -391,60 +391,78 @@ with tab2:
         h2.markdown("**FROM  (start)**")
         h3.markdown("**TO  (end)**")
 
-        ranges     = st.session_state.ranges
-        to_delete  = None
+        ranges    = st.session_state.ranges
+        to_delete = None
 
+        # ── Pre-render: push auto-labels into widget session_state BEFORE
+        #   st.text_input() is called.  Streamlit ignores value= on reruns
+        #   once a key exists, so we must write st.session_state directly.
         for i, rng in enumerate(ranges):
-            color = RANGE_COLORS[i % len(RANGE_COLORS)]
+            curr_from = st.session_state.get(f"from_{i}", rng.get('from', ''))
+            curr_to   = st.session_state.get(f"to_{i}",   rng.get('to',   ''))
+            auto_lbl  = make_range_label(curr_from, curr_to)
+
+            if auto_lbl and not rng.get('locked', False):
+                # Sync both the dict and the widget key
+                rng['label']                   = auto_lbl
+                st.session_state[f"lbl_{i}"]   = auto_lbl
+
+            # Keep rng dict in sync with widget state (FROM/TO)
+            rng['from'] = curr_from
+            rng['to']   = curr_to
+
+        # ── Render rows ──────────────────────────────────────────────────────
+        for i, rng in enumerate(ranges):
             with st.container():
                 c1, c2, c3, c4 = st.columns([2, 3, 3, 0.6])
 
                 with c1:
+                    def _lock(idx=i):
+                        """Called when user manually edits the label field."""
+                        st.session_state.ranges[idx]['locked'] = True
+
                     new_lbl = st.text_input(
-                        f"lbl_{i}", value=rng['label'], key=f"lbl_{i}",
-                        label_visibility='collapsed'
+                        f"lbl_{i}",
+                        key=f"lbl_{i}",
+                        label_visibility='collapsed',
+                        on_change=_lock,
                     )
                     rng['label'] = new_lbl
 
                 with c2:
                     fi = dt_opts.index(rng['from']) if rng['from'] in dt_opts else 0
-                    new_from = st.selectbox(
+                    st.selectbox(
                         f"from_{i}", options=dt_opts, index=fi,
-                        key=f"from_{i}", label_visibility='collapsed'
+                        key=f"from_{i}", label_visibility='collapsed',
                     )
-                    if new_from != rng['from']:
-                        rng['from'] = new_from
-                        # Auto-label if user hasn't locked it
-                        if not rng.get('locked'):
-                            rng['label'] = make_range_label(new_from, rng['to']) or rng['label']
 
                 with c3:
                     ti = dt_opts.index(rng['to']) if rng['to'] in dt_opts else 0
-                    new_to = st.selectbox(
+                    st.selectbox(
                         f"to_{i}", options=dt_opts, index=ti,
-                        key=f"to_{i}", label_visibility='collapsed'
+                        key=f"to_{i}", label_visibility='collapsed',
                     )
-                    if new_to != rng['to']:
-                        rng['to'] = new_to
-                        if not rng.get('locked'):
-                            rng['label'] = make_range_label(rng['from'], new_to) or rng['label']
 
                 with c4:
                     if len(ranges) > 1 and st.button("✕", key=f"del_{i}"):
                         to_delete = i
 
         if to_delete is not None:
+            # Clean up widget keys for the deleted range
+            for k in [f"lbl_{to_delete}", f"from_{to_delete}", f"to_{to_delete}"]:
+                st.session_state.pop(k, None)
             st.session_state.ranges.pop(to_delete)
             st.rerun()
 
         if st.button("＋  Add Timestamp Range"):
-            n = len(st.session_state.ranges) + 1
-            st.session_state.ranges.append({'label': f'Range {n}', 'from': '', 'to': ''})
+            # New range starts unlocked with no label — auto-label will fill it
+            st.session_state.ranges.append({'label': '', 'from': '', 'to': '',
+                                             'locked': False})
             st.rerun()
 
         st.caption(
-            "💡  Auto-label updates when you pick FROM / TO.  "
-            "Edit the Label field to lock your own name."
+            "💡  Label fills automatically from the columns you pick.  "
+            "Type your own label to lock it — it will stay even if you change columns."
         )
 
         st.divider()
